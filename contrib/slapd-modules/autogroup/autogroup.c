@@ -910,7 +910,7 @@ autogroup_delete_group( autogroup_info_t *agi, autogroup_entry_t *e )
 	int			rc = 1;
 
 	Debug( LDAP_DEBUG_TRACE, "==> autogroup_delete_group <%s>\n", 
-		age->age_dn.bv_val, 0, 0);
+		e->age_dn.bv_val, 0, 0);
 
 	for ( age_next = age ; age_next ; age_prev = age, age = age_next ) {
 		age_next = age->age_next;
@@ -922,7 +922,7 @@ autogroup_delete_group( autogroup_info_t *agi, autogroup_entry_t *e )
 			if ( age_prev != NULL ) {
 				age_prev->age_next = age_next;
 			} else {
-				agi->agi_entry = NULL;
+				agi->agi_entry = age_next;
 			}
 
 			ch_free( age->age_dn.bv_val );
