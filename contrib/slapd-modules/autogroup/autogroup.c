@@ -1069,7 +1069,7 @@ autogroup_check_do_refresh_members( Operation *op, autogroup_info_t *agi )
 		/* Request detected that the group must be refreshed */
 		if ( age->age_mustrefresh ) {
 
-			Debug( LDAP_DEBUG_TRACE, "==> autogroup_refresh_groups refresh members of group <%s>\n", age->age_dn.bv_val, 0, 0);
+			Debug( LDAP_DEBUG_TRACE, "==> autogroup_check_do_refresh_members refresh members of group <%s>\n", age->age_dn.bv_val, 0, 0);
 			autogroup_delete_member_from_group( op, NULL, NULL, age) ;
 
 			for ( agf = age->age_filter ; agf ; agf = agf->agf_next ) {
@@ -1576,9 +1576,11 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 	Debug( LDAP_DEBUG_TRACE, "==> autogroup_modify_entry <%s>\n", op->o_req_dn.bv_val, 0, 0);
 	ldap_pvt_thread_mutex_lock( &agi->agi_mutex );			
 
+	/*
 	for ( age = agi->agi_entry ; age ; age = age->age_next ) {
 		Debug( LDAP_DEBUG_TRACE, "* current autogroups <%s>\n", age->age_dn.bv_val, 0, 0);
 	}
+	*/
 
 	if ( overlay_entry_get_ov( op, &op->o_req_ndn, NULL, NULL, 0, &e, on ) !=
 		LDAP_SUCCESS || e == NULL ) {
