@@ -1031,11 +1031,12 @@ autogroup_delete_entry( Operation *op, SlapReply *rs)
 					** But the refresh can't be done now because the entry is not deleted
 					** So the group is marked as mustrefresh
 					*/
-					if ( agf->agf_anlist ) {
+					//XXX FIXME: autogroup_delete_member_from_group gets stuck, always refresh for now
+					//if ( agf->agf_anlist ) {
 						age->age_mustrefresh = 1;
-					} else {
-						autogroup_delete_member_from_group( op, &e->e_name, &e->e_nname, age );
-					}
+					//} else {
+					//	autogroup_delete_member_from_group( op, &e->e_name, &e->e_nname, age );
+					//}
 					break;
 				}
 			}
@@ -1052,10 +1053,11 @@ autogroup_delete_entry( Operation *op, SlapReply *rs)
 }
 
 /*
+** Check all autogroups if the refresh flag is set and if so delete and re-add all members
 ** agi	- internal group and attribute definitions list
 */
 static void
-autogroup_refresh_groups( Operation *op, autogroup_info_t *agi )
+autogroup_check_do_refresh_members( Operation *op, autogroup_info_t *agi )
 {
 	autogroup_entry_t	*age;
 	autogroup_filter_t	*agf;
@@ -1066,17 +1068,76 @@ autogroup_refresh_groups( Operation *op, autogroup_info_t *agi )
 
 		/* Request detected that the group must be refreshed */
 		if ( age->age_mustrefresh ) {
+
+			Debug( LDAP_DEBUG_TRACE, "==> autogroup_refresh_groups refresh members of group <%s>\n", age->age_dn.bv_val, 0, 0);
 			autogroup_delete_member_from_group( op, NULL, NULL, age) ;
 
 			for ( agf = age->age_filter ; agf ; agf = agf->agf_next ) {
 				autogroup_add_members_from_filter( op, NULL, age, agf, 1 );
 			}
 		}
+		 age->age_mustrefresh = 0;
 		ldap_pvt_thread_mutex_unlock( &age->age_mutex );
 	}
 	ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
 }
 
+
+/*
+* Check if the operation contains an objectclass managed by autogroup
+* return 1 if found otherwise 0
+*/
+static int
+autogroup_is_autogroup_objectclass( Operation *op, Entry *e )
+{
+	slap_overinst *on = (slap_overinst *)op->o_bd->bd_info;
+	autogroup_info_t	*agi = (autogroup_info_t *)on->on_bi.bi_private;
+	autogroup_def_t		*agd = agi->agi_def;
+	Attribute *oc;
+
+	oc = attrs_find( e->e_attrs, slap_schema.si_ad_objectClass );
+	if ( oc == NULL ) {
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_autogroup_objectclass entry <%s> has no objectClass\n",
+			op->o_req_dn.bv_val, 0, 0);
+		return 0;
+	}
+
+	for ( ; agd; agd = agd->agd_next ) {
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_autogroup_objectclass checking <%s> objectclass <%s> <=> <%s>\n",
+			op->o_req_dn.bv_val, oc->a_nvals[0].bv_val, agd->agd_oc->soc_cname.bv_val);
+
+		if ( value_find_ex( slap_schema.si_ad_objectClass,
+				SLAP_MR_ATTRIBUTE_VALUE_NORMALIZED_MATCH |
+				SLAP_MR_ASSERTED_VALUE_NORMALIZED_MATCH,
+				oc->a_nvals, &agd->agd_oc->soc_cname,
+				op->o_tmpmemctx ) == 0 )
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+* Check if the memberURL has changed of an autogroup entry
+* return 1 if found otherwise 0
+*/
+static int
+autogroup_memberurl_changed( Operation *op, autogroup_entry_t *age)
+{
+	Modifications	*m = op->orm_modlist;
+
+	Debug( LDAP_DEBUG_TRACE, "==> autogroup_memberurl_changed checking <%s>\n", op->o_req_dn.bv_val, 0, 0);
+
+	for ( ; m ; m = m->sml_next ) {
+		if ( m->sml_desc == age->age_def->agd_member_url_ad ) {
+			Debug( LDAP_DEBUG_TRACE, "==> autogroup_memberurl_changed memberURL for group <%s> changed\n", 
+				op->o_req_dn.bv_val, 0, 0);
+			return 1;
+		}
+	}
+	return 0;
+}
 
 static int
 autogroup_response( Operation *op, SlapReply *rs )
@@ -1088,7 +1149,7 @@ autogroup_response( Operation *op, SlapReply *rs )
 	autogroup_filter_t	*agf;
 	BerValue		new_dn, new_ndn, pdn;
 	Entry			*e, *group;
-	Attribute		*a, *ea, *attrs;
+	Attribute		*oc, *ea, *attrs;
 	int			is_olddn, is_newdn, is_value_refresh, dn_equal;
 	OpExtra *oex;
 
@@ -1106,20 +1167,64 @@ autogroup_response( Operation *op, SlapReply *rs )
 	/* Handle all cases where a refresh of the group is needed */
 	switch ( op->o_tag ) {
 	case LDAP_REQ_DELETE:
-		Debug( LDAP_DEBUG_TRACE, "==> autogroup_response LDAP_REQ_DELETE from <%s>\n", op->o_req_dn.bv_val, 0, 0);
-		autogroup_refresh_groups(op, agi);
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_response LDAP_REQ_DELETE <%s>\n", op->o_req_dn.bv_val, 0, 0);
+		autogroup_check_do_refresh_members(op, agi);
 		break;
 	case LDAP_REQ_MODIFY:
-		Debug( LDAP_DEBUG_TRACE, "==> autogroup_response LDAP_REQ_MODIFY from <%s>\n", op->o_req_dn.bv_val, 0, 0);
-		autogroup_refresh_groups(op, agi);
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_response LDAP_REQ_MODIFY <%s>\n", op->o_req_dn.bv_val, 0, 0);
+		autogroup_check_do_refresh_members(op, agi);
+
+		if ( overlay_entry_get_ov( op, &op->o_req_ndn, NULL, NULL, 0, &e, on ) !=
+			LDAP_SUCCESS || e == NULL ) {
+			Debug( LDAP_DEBUG_TRACE, "==> autogroup_response cannot get entry for <%s>\n", op->o_req_dn.bv_val, 0, 0);
+			return SLAP_CB_CONTINUE;
+		}
+
+		if (!autogroup_is_autogroup_objectclass(op, e)) {
+			overlay_entry_release_ov( op, e, 0, on );
+			return SLAP_CB_CONTINUE;
+		}
+
+		ldap_pvt_thread_mutex_lock( &agi->agi_mutex );
+
+		/* For each autogroup, check if the dn matches with the modified entry,
+		and if the memberURL has changed */
+		for ( age = agi->agi_entry ; age ; age = age->age_next ) {
+			ldap_pvt_thread_mutex_lock( &age->age_mutex );
+
+			int match = 1;
+			dnMatch( &match, 0, NULL, NULL, &op->o_req_ndn, &age->age_ndn );
+			if ( match == 0 ) {
+
+				if (autogroup_memberurl_changed(op, age)) {
+					/* If we modify a group's memberURL, we have to delete all of it's members,
+					and add them anew, because we cannot tell from which memberURL a member was added. */
+					autogroup_def_t	*group_agd = age->age_def;
+
+					overlay_entry_release_ov( op, e, 0, on );
+
+					autogroup_delete_member_from_group( op, NULL, NULL, age );
+					autogroup_delete_group( agi, age );
+					autogroup_add_group( op, agi, group_agd, NULL, &op->o_req_ndn, 1, 1);
+
+					ldap_pvt_thread_mutex_unlock( &age->age_mutex );
+					ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
+					return SLAP_CB_CONTINUE;
+				}
+			}
+			ldap_pvt_thread_mutex_unlock( &age->age_mutex );
+		}
+		ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
+		overlay_entry_release_ov( op, e, 0, on );
 	break;
 
 	case LDAP_REQ_MODRDN:
 
-		Debug( LDAP_DEBUG_TRACE, "==> autogroup_response MODRDN from <%s>\n", op->o_req_dn.bv_val, 0, 0);
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_response LDAP_REQ_MODRDN from <%s>\n", op->o_req_dn.bv_val, 0, 0);
+		/* refint or other overlays can have modified entries and flagging them for refresh */
+		autogroup_check_do_refresh_members(op, agi);
 
-		ldap_pvt_thread_mutex_lock( &agi->agi_mutex );			
-
+		/* new_dn */
 		if ( op->oq_modrdn.rs_newSup ) {
 			pdn = *op->oq_modrdn.rs_newSup;
 		} else {
@@ -1127,6 +1232,7 @@ autogroup_response( Operation *op, SlapReply *rs )
 		}
 		build_new_dn( &new_dn, &pdn, &op->orr_newrdn, op->o_tmpmemctx );
 
+		/* new_ndn */
 		if ( op->oq_modrdn.rs_nnewSup ) {
 			pdn = *op->oq_modrdn.rs_nnewSup;
 		} else {
@@ -1134,54 +1240,42 @@ autogroup_response( Operation *op, SlapReply *rs )
 		}
 		build_new_dn( &new_ndn, &pdn, &op->orr_nnewrdn, op->o_tmpmemctx );
 
-		Debug( LDAP_DEBUG_TRACE, "autogroup_response MODRDN to <%s>\n", new_dn.bv_val, 0, 0);
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_response LDAP_REQ_MODRDN to <%s>\n", new_dn.bv_val, 0, 0);
 
 		dnMatch( &dn_equal, 0, NULL, NULL, &op->o_req_ndn, &new_ndn );
 
 		if ( overlay_entry_get_ov( op, &new_ndn, NULL, NULL, 0, &e, on ) !=
 			LDAP_SUCCESS || e == NULL ) {
-			Debug( LDAP_DEBUG_TRACE, "autogroup_response MODRDN cannot get entry for <%s>\n", new_dn.bv_val, 0, 0);
-			ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
+			Debug( LDAP_DEBUG_TRACE, "autogroup_response LDAP_REQ_MODRDN cannot get entry for <%s>\n", new_dn.bv_val, 0, 0);
 			return SLAP_CB_CONTINUE;
 		}
 
-		a = attrs_find( e->e_attrs, slap_schema.si_ad_objectClass );
+		ldap_pvt_thread_mutex_lock( &agi->agi_mutex );
 
+		if (autogroup_is_autogroup_objectclass(op, e)) {
 
-		if ( a == NULL ) {
-			Debug( LDAP_DEBUG_TRACE, "autogroup_response MODRDN entry <%s> has no objectClass\n", new_dn.bv_val, 0, 0);
-			overlay_entry_release_ov( op, e, 0, on );
-			ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );		
-			return SLAP_CB_CONTINUE;
-		}
+			/* For each autogroup, check if the dn matches with the modified entry,
+			and if the memberURL has changed */
+			for ( age = agi->agi_entry ; age ; age = age->age_next ) {
+				ldap_pvt_thread_mutex_lock( &age->age_mutex );
 
-
-		/* If a groups DN is modified, just update age_dn/ndn of that group with the new DN. */
-		for ( ; agd; agd = agd->agd_next ) {
-
-			if ( value_find_ex( slap_schema.si_ad_objectClass,
-					SLAP_MR_ATTRIBUTE_VALUE_NORMALIZED_MATCH |
-					SLAP_MR_ASSERTED_VALUE_NORMALIZED_MATCH,
-					a->a_nvals, &agd->agd_oc->soc_cname,
-					op->o_tmpmemctx ) == 0 )
-			{		
-				for ( age = agi->agi_entry ; age ; age = age->age_next ) {
-					int match = 1;
-
-					dnMatch( &match, 0, NULL, NULL, &age->age_ndn, &op->o_req_ndn );
-					if ( match == 0 ) {
-						Debug( LDAP_DEBUG_TRACE, "autogroup_response MODRDN updating group's DN to <%s>\n", new_dn.bv_val, 0, 0);
+				int match = 1;
+				dnMatch( &match, 0, NULL, NULL, &op->o_req_ndn, &age->age_ndn );
+				if ( match == 0 ) {
+						Debug( LDAP_DEBUG_TRACE, "autogroup_response LDAP_REQ_MODRDN updating group DN to <%s>\n", new_dn.bv_val, 0, 0);
 						ber_dupbv( &age->age_dn, &new_dn );
 						ber_dupbv( &age->age_ndn, &new_ndn );
 
 						op->o_tmpfree( new_dn.bv_val, op->o_tmpmemctx  );
 						op->o_tmpfree( new_ndn.bv_val, op->o_tmpmemctx );
 						overlay_entry_release_ov( op, e, 0, on );
-						ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );		
+
+						ldap_pvt_thread_mutex_unlock( &age->age_mutex );
+						ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
 						return SLAP_CB_CONTINUE;
-					}
 				}
 
+				ldap_pvt_thread_mutex_unlock( &age->age_mutex );
 			}
 		}
 
@@ -1231,13 +1325,13 @@ autogroup_response( Operation *op, SlapReply *rs )
 					return SLAP_CB_CONTINUE;
 				}
 
-				a = attrs_find( group->e_attrs, age->age_def->agd_member_ad );
+				oc = attrs_find( group->e_attrs, age->age_def->agd_member_ad );
 
-				if ( a != NULL ) {
+				if ( oc != NULL ) {
 					if ( value_find_ex( age->age_def->agd_member_ad,
 							SLAP_MR_ATTRIBUTE_VALUE_NORMALIZED_MATCH |
 							SLAP_MR_ASSERTED_VALUE_NORMALIZED_MATCH,
-							a->a_nvals, ea ? ea->a_nvals : &op->o_req_ndn, op->o_tmpmemctx ) == 0 ) 
+							oc->a_nvals, ea ? ea->a_nvals : &op->o_req_ndn, op->o_tmpmemctx ) == 0 ) 
 					{
 						is_olddn = 1;
 					}
@@ -1329,78 +1423,10 @@ autogroup_response( Operation *op, SlapReply *rs )
 	if ( op->o_tag == LDAP_REQ_MODIFY ) {
 		Entry etmp;
 		struct berval odn, ondn;
+		Attribute *a;
 		Debug( LDAP_DEBUG_TRACE, "==> autogroup_response MODIFY <%s>\n", op->o_req_dn.bv_val, 0, 0);
 
-		ldap_pvt_thread_mutex_lock( &agi->agi_mutex );			
-
-		if ( overlay_entry_get_ov( op, &op->o_req_ndn, NULL, NULL, 0, &e, on ) !=
-			LDAP_SUCCESS || e == NULL ) {
-			Debug( LDAP_DEBUG_TRACE, "autogroup_response MODIFY cannot get entry for <%s>\n", op->o_req_dn.bv_val, 0, 0);
-			ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
-			return SLAP_CB_CONTINUE;
-		}
-
-		a = attrs_find( e->e_attrs, slap_schema.si_ad_objectClass );
-
-
-		if ( a == NULL ) {
-			Debug( LDAP_DEBUG_TRACE, "autogroup_response MODIFY entry <%s> has no objectClass\n", op->o_req_dn.bv_val, 0, 0);
-			overlay_entry_release_ov( op, e, 0, on );
-			ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );		
-			return SLAP_CB_CONTINUE;
-		}
-
-		/* If we modify a group's memberURL, we have to delete all of it's members,
-			and add them anew, because we cannot tell from which memberURL a member was added. */
-		for ( ; agd; agd = agd->agd_next ) {
-
-			if ( value_find_ex( slap_schema.si_ad_objectClass,
-					SLAP_MR_ATTRIBUTE_VALUE_NORMALIZED_MATCH |
-					SLAP_MR_ASSERTED_VALUE_NORMALIZED_MATCH,
-					a->a_nvals, &agd->agd_oc->soc_cname,
-					op->o_tmpmemctx ) == 0 )
-			{
-				Modifications	*m;
-				int		match = 1;
-
-				m = op->orm_modlist;
-
-				for ( age = agi->agi_entry ; age ; age = age->age_next ) {
-					ldap_pvt_thread_mutex_lock( &age->age_mutex );
-
-					dnMatch( &match, 0, NULL, NULL, &op->o_req_ndn, &age->age_ndn );
-
-					if ( match == 0 ) {
-						for ( ; m ; m = m->sml_next ) {
-							if ( m->sml_desc == age->age_def->agd_member_url_ad ) {
-								autogroup_def_t	*group_agd = age->age_def;
-								Debug( LDAP_DEBUG_TRACE, "==> autogroup_response MODIFY changing memberURL for group <%s>\n", 
-									op->o_req_dn.bv_val, 0, 0);
-
-								overlay_entry_release_ov( op, e, 0, on );
-
-								autogroup_delete_member_from_group( op, NULL, NULL, age );
-								autogroup_delete_group( agi, age );
-
-								autogroup_add_group( op, agi, group_agd, NULL, &op->o_req_ndn, 1, 1);
-
-								ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
-								return SLAP_CB_CONTINUE;
-							}
-						}
-
-						ldap_pvt_thread_mutex_unlock( &age->age_mutex );
-						break;
-					}
-
-					ldap_pvt_thread_mutex_unlock( &age->age_mutex );
-				}
-
-				overlay_entry_release_ov( op, e, 0, on );
-				ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
-				return SLAP_CB_CONTINUE;
-			}
-		}
+		ldap_pvt_thread_mutex_lock( &agi->agi_mutex );
 
 		/* When modifying any of the attributes of an entry, we must
 			check if the entry is in any of our groups, and if
@@ -1542,8 +1568,9 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 	OpExtra *oex;
 
 	LDAP_SLIST_FOREACH( oex, &op->o_extra, oe_next ) {
-		if ( oex->oe_key == (void *)&autogroup )
+		if ( oex->oe_key == (void *)&autogroup ) {
 			return SLAP_CB_CONTINUE;
+		}
 	}
 
 	Debug( LDAP_DEBUG_TRACE, "==> autogroup_modify_entry <%s>\n", op->o_req_dn.bv_val, 0, 0);
@@ -1576,6 +1603,7 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 						if ( dnIsSuffix( &op->o_req_ndn, &agf->agf_ndn ) ) {
 							int rc = test_filter( op, e, agf->agf_filter );
 							if ( rc == LDAP_COMPARE_TRUE ) {
+								Debug( LDAP_DEBUG_TRACE, "==> autogroup_modify_entry <%s> set mustrefresh=1\n", op->o_req_dn.bv_val, 0, 0);
 								age->age_mustrefresh = 1;
 							}
 						}
@@ -1584,6 +1612,7 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 			}
 
 			if ( autogroup_memberOf_filter( agf->agf_filter, &op->o_req_ndn, agi->agi_memberof_ad ) ) {
+				Debug( LDAP_DEBUG_TRACE, "==> autogroup_modify_entry <%s> set mustrefresh=1 (memberof)\n", op->o_req_dn.bv_val, 0, 0);
 				age->age_mustrefresh = 1;
 			}
 		}
@@ -1626,6 +1655,7 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 							return LDAP_CONSTRAINT_VIOLATION;
 						}
 						if ( m->sml_desc == age->age_def->agd_member_url_ad ) {
+							// XXXX Fixme: add url validity check
 							Debug( LDAP_DEBUG_TRACE, "autogroup_modify_entry attempted to modify group's <%s> memberURL attribute\n", op->o_req_dn.bv_val, 0, 0);
 						}
 					}
