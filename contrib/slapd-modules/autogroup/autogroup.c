@@ -1088,30 +1088,13 @@ autogroup_check_do_refresh_members( Operation *op, autogroup_info_t *agi )
 * return 1 if found otherwise 0
 */
 static int
-autogroup_is_autogroup_objectclass( Operation *op, Entry *e )
+autogroup_is_autogroup_objectclass( Entry *e, autogroup_def_t *agd )
 {
-	slap_overinst *on = (slap_overinst *)op->o_bd->bd_info;
-	autogroup_info_t	*agi = (autogroup_info_t *)on->on_bi.bi_private;
-	autogroup_def_t		*agd = agi->agi_def;
-	Attribute *oc;
-
-	oc = attrs_find( e->e_attrs, slap_schema.si_ad_objectClass );
-	if ( oc == NULL ) {
-		Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_autogroup_objectclass entry <%s> has no objectClass\n",
-			op->o_req_dn.bv_val, 0, 0);
-		return 0;
-	}
-
 	for ( ; agd; agd = agd->agd_next ) {
-		Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_autogroup_objectclass checking <%s> objectclass <%s> <=> <%s>\n",
-			op->o_req_dn.bv_val, oc->a_nvals[0].bv_val, agd->agd_oc->soc_cname.bv_val);
-
-		if ( value_find_ex( slap_schema.si_ad_objectClass,
-				SLAP_MR_ATTRIBUTE_VALUE_NORMALIZED_MATCH |
-				SLAP_MR_ASSERTED_VALUE_NORMALIZED_MATCH,
-				oc->a_nvals, &agd->agd_oc->soc_cname,
-				op->o_tmpmemctx ) == 0 )
-		{
+		/* CHECK: or use is_entry_objectclass_or_sub? */
+		if ( is_entry_objectclass(e, agd->agd_oc, 0) ) {
+			Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_autogroup_objectclass <%s> is autogroup objectclass <%s>\n",
+			e->e_name.bv_val, agd->agd_oc->soc_cname.bv_val, 0);
 			return 1;
 		}
 	}
@@ -1180,7 +1163,7 @@ autogroup_response( Operation *op, SlapReply *rs )
 			return SLAP_CB_CONTINUE;
 		}
 
-		if (!autogroup_is_autogroup_objectclass(op, e)) {
+		if ( !autogroup_is_autogroup_objectclass(e, agd) ) {
 			overlay_entry_release_ov( op, e, 0, on );
 			return SLAP_CB_CONTINUE;
 		}
@@ -1252,7 +1235,7 @@ autogroup_response( Operation *op, SlapReply *rs )
 
 		ldap_pvt_thread_mutex_lock( &agi->agi_mutex );
 
-		if (autogroup_is_autogroup_objectclass(op, e)) {
+		if ( autogroup_is_autogroup_objectclass(e, agd) ) {
 
 			/* For each autogroup, check if the dn matches with the modified entry,
 			and if the memberURL has changed */
@@ -1622,23 +1605,9 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 	op->o_dn = odn;
 	op->o_ndn = ondn;
 
-	a = attrs_find( e->e_attrs, slap_schema.si_ad_objectClass );
-
-	if ( a == NULL ) {
-		Debug( LDAP_DEBUG_TRACE, "autogroup_modify_entry entry <%s> has no objectClass\n", op->o_req_dn.bv_val, 0, 0);
-		ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );		
-		return SLAP_CB_CONTINUE;
-	}
-
 
 	for ( ; agd; agd = agd->agd_next ) {
-
-		if ( value_find_ex( slap_schema.si_ad_objectClass,
-				SLAP_MR_ATTRIBUTE_VALUE_NORMALIZED_MATCH |
-				SLAP_MR_ASSERTED_VALUE_NORMALIZED_MATCH,
-				a->a_nvals, &agd->agd_oc->soc_cname,
-				op->o_tmpmemctx ) == 0 )
-		{
+		if ( autogroup_is_autogroup_objectclass(e, agd) ) {
 			Modifications	*m;
 			int		match = 1;
 
@@ -1657,14 +1626,14 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 							return LDAP_CONSTRAINT_VIOLATION;
 						}
 						if ( m->sml_desc == age->age_def->agd_member_url_ad ) {
-							// XXXX Fixme: add url validity check
+							// XXXX Fixme: add url validity check and flag refresh
+							//age->age_mustrefresh = 1;
 							Debug( LDAP_DEBUG_TRACE, "autogroup_modify_entry attempted to modify group's <%s> memberURL attribute\n", op->o_req_dn.bv_val, 0, 0);
 						}
 					}
 					break;
 				}
 			}
-
 			/* an entry may only have one dynamic group class */
 			break;
 		}
