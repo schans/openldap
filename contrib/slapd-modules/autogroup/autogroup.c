@@ -579,6 +579,79 @@ autogroup_add_members_from_filter( Operation *op, Entry *e, autogroup_entry_t *a
 	return 0;
 }
 
+
+/*
+** Check if the url is a valid member url for an autogroup
+** TODO/FIXME: pass error string back so error can be send to client
+*/
+static int
+autogroup_is_valid_member_url(LDAP_CONST char *url) 
+{
+	LDAPURLDesc *lud = NULL;
+	BerValue dn;
+	int rc;
+
+	Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_valid_member_url <%s>\n", url, 0, 0);
+
+	rc = ldap_url_parse( url, &lud );
+	if ( rc != LDAP_URL_SUCCESS ) {
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_valid_member_url cannot parse url <%s>\n", url, 0, 0 );
+		ldap_free_urldesc( lud );
+		return rc;
+	}
+
+	if ( lud->lud_dn == NULL ) {
+		/* note that an empty base is not honored in terms
+			* of defaultSearchBase, because select_backend()
+			* is not aware of the defaultSearchBase option;
+			* this can be useful in case of a database serving
+			* the empty suffix */
+		BER_BVSTR( &dn, "" );
+
+	} else {
+		ber_str2bv( lud->lud_dn, 0, 0, &dn );
+	}
+
+	rc = dnValidate(NULL, &dn);
+	if (  rc != LDAP_SUCCESS ) {
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_valid_member_url invalid DN <%s>\n", dn.bv_val, 0, 0 );
+		ldap_free_urldesc( lud );
+		return rc;
+	}
+
+	if ( lud->lud_filter == NULL || lud->lud_filter[0] == '\0' ) {
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_valid_member_url filter is missing <%s>\n", url, 0, 0 );
+		ldap_free_urldesc( lud );
+		/* better error code? */
+		return LDAP_URL_ERR_BADFILTER;
+	}
+
+	if ( str2filter( lud->lud_filter ) == NULL ) {
+		Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_valid_member_url filter is invalid <%s>\n", url, 0, 0 );
+		return LDAP_URL_ERR_BADFILTER;
+	}
+
+	if ( lud->lud_attrs != NULL ) {
+
+		if ( lud->lud_attrs[1] != NULL ) {
+			Debug( LDAP_DEBUG_ANY, "==> autogroup_is_valid_member_url too many attributes specified in url <%s>\n", url, 0 ,0 );
+			ldap_free_urldesc( lud );
+			return LDAP_URL_ERR_BADATTRS;
+		}
+
+		if ( str2anlist( NULL, lud->lud_attrs[0], "," ) == NULL ) {
+			Debug( LDAP_DEBUG_ANY, "==> autogroup_is_valid_member_url unable to find attribute description for <%s>\n", lud->lud_attrs[0], 0, 0 );
+			ldap_free_urldesc( lud );
+			return LDAP_URL_ERR_BADATTRS;
+		}
+	}
+
+	Debug( LDAP_DEBUG_TRACE, "==> autogroup_is_valid_member_url <%s> is valid\n", url, 0, 0);
+
+	ldap_free_urldesc( lud );
+	return LDAP_URL_SUCCESS;
+}
+
 /* 
 ** Adds a group to the internal list from the passed entry.
 ** scan specifies whether to add all matching members to the group.
@@ -647,85 +720,39 @@ autogroup_add_group( Operation *op, autogroup_info_t *agi, autogroup_def_t *agd,
 	} else {
 		for ( bv = a->a_nvals; !BER_BVISNULL( bv ); bv++ ) {
 
-			agf = (autogroup_filter_t*)ch_calloc( 1, sizeof( autogroup_filter_t ) );
-
-			if ( ldap_url_parse( bv->bv_val, &lud ) != LDAP_URL_SUCCESS ) {
+			/* should alrady have been validated in autgroup_modify_entry */
+			rc = autogroup_is_valid_member_url( bv->bv_val );
+			if ( rc != LDAP_URL_SUCCESS ) {
 				Debug( LDAP_DEBUG_TRACE, "autogroup_add_group: cannot parse url <%s>\n", bv->bv_val,0,0);
-				/* FIXME: error? */
-				ch_free( agf ); 
 				continue;
 			}
 
-			agf->agf_scope = lud->lud_scope;
-
+			/* url has been checked and is valid, no need to recheck everyting */
+			ldap_url_parse( bv->bv_val, &lud );
 			if ( lud->lud_dn == NULL ) {
 				BER_BVSTR( &dn, "" );
 			} else {
 				ber_str2bv( lud->lud_dn, 0, 0, &dn );
 			}
 
-			rc = dnPrettyNormal( NULL, &dn, &agf->agf_dn, &agf->agf_ndn, NULL );
-			if ( rc != LDAP_SUCCESS ) {
-				Debug( LDAP_DEBUG_TRACE, "autogroup_add_group: cannot normalize DN <%s>\n", dn.bv_val,0,0);
-				/* FIXME: error? */
-				goto cleanup;
-			}
+			agf = (autogroup_filter_t*)ch_calloc( 1, sizeof( autogroup_filter_t ) );
+			agf->agf_scope = lud->lud_scope;
 
-			if ( lud->lud_filter != NULL ) {
-				ber_str2bv( lud->lud_filter, 0, 1, &agf->agf_filterstr);
-				agf->agf_filter = str2filter( lud->lud_filter );
-			} else {
-				Debug( LDAP_DEBUG_TRACE, "autogroup_add_group: URL filter is missing <%s>\n", bv->bv_val,0,0);
-				/* FIXME: error? */
-				goto cleanup;
-			}
+			dnPrettyNormal( NULL, &dn, &agf->agf_dn, &agf->agf_ndn, NULL );
+			ber_str2bv( lud->lud_filter, 0, 1, &agf->agf_filterstr);
+			agf->agf_filter = str2filter( lud->lud_filter );
 
 			if ( lud->lud_attrs != NULL ) {
-				int i;
-
-				for ( i=0 ; lud->lud_attrs[i]!=NULL ; i++) {
-					/* Just counting */;
-				}
-
-				if ( i > 1 ) {
-					Debug( LDAP_DEBUG_ANY, "autogroup_add_group: too many attributes specified in url <%s>\n",
-						bv->bv_val, 0, 0);
-					/* FIXME: error? */
-					filter_free( agf->agf_filter );
-					ch_free( agf->agf_filterstr.bv_val );
-					ch_free( agf->agf_dn.bv_val );
-					ch_free( agf->agf_ndn.bv_val );
-					ldap_free_urldesc( lud );
-					ch_free( agf );
-					continue;
-				}
-
 				agf->agf_anlist = str2anlist( NULL, lud->lud_attrs[0], "," );
-
-				if ( agf->agf_anlist == NULL ) {
-					Debug( LDAP_DEBUG_ANY, "autogroup_add_group: unable to find AttributeDescription \"%s\".\n",
-						lud->lud_attrs[0], 0, 0 );
-					/* FIXME: error? */
-					filter_free( agf->agf_filter );
-					ch_free( agf->agf_filterstr.bv_val );
-					ch_free( agf->agf_dn.bv_val );
-					ch_free( agf->agf_ndn.bv_val );
-					ldap_free_urldesc( lud );
-					ch_free( agf );
-					continue;
-				}
 			}
-
+			
 			agf->agf_next = NULL;
-
 			if( (*agep)->age_filter == NULL ) {
 				(*agep)->age_filter = agf;
 			}
-
 			if( agf_prev != NULL ) {
 				agf_prev->agf_next = agf;
 			}
-
 			agf_prev = agf;
 
 			Debug( LDAP_DEBUG_TRACE, "==> autogroup_add_group added memberURL DN <%s> with filter <%s>\n",
@@ -736,16 +763,6 @@ autogroup_add_group( Operation *op, autogroup_info_t *agi, autogroup_def_t *agd,
 			}
 
 			ldap_free_urldesc( lud );
-
-			continue;
-
-
-cleanup:;
-
-			ch_free( agf->agf_ndn.bv_val );
-			ch_free( agf->agf_dn.bv_val );
-			ldap_free_urldesc( lud );				
-			ch_free( agf ); 
 		}
 	}
 
@@ -1076,7 +1093,7 @@ autogroup_check_do_refresh_members( Operation *op, autogroup_info_t *agi )
 				autogroup_add_members_from_filter( op, NULL, age, agf, 1 );
 			}
 		}
-		 age->age_mustrefresh = 0;
+		age->age_mustrefresh = 0;
 		ldap_pvt_thread_mutex_unlock( &age->age_mutex );
 	}
 	ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
@@ -1546,7 +1563,6 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 	autogroup_def_t		*agd = agi->agi_def;
 	autogroup_entry_t	*age;
 	Entry			*e;
-	Attribute		*a;
 	struct berval odn, ondn;
 	OpExtra *oex;
 
@@ -1609,7 +1625,8 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 	for ( ; agd; agd = agd->agd_next ) {
 		if ( autogroup_is_autogroup_objectclass(e, agd) ) {
 			Modifications	*m;
-			int		match = 1;
+			int	match = 1;
+			int i;
 
 			m = op->orm_modlist;
 
@@ -1621,14 +1638,27 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 						if ( m->sml_desc == age->age_def->agd_member_ad ) {
 							overlay_entry_release_ov( op, e, 0, on );
 							ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
-							Debug( LDAP_DEBUG_TRACE, "autogroup_modify_entry attempted to modify group's <%s> member attribute\n", op->o_req_dn.bv_val, 0, 0);
-							send_ldap_error(op, rs, LDAP_CONSTRAINT_VIOLATION, "attempt to modify dynamic group member attribute");
+							Debug( LDAP_DEBUG_TRACE, "==> autogroup_modify_entry attempted to modify group's <%s> member attribute\n", op->o_req_dn.bv_val, 0, 0);
+							send_ldap_error(op, rs, LDAP_CONSTRAINT_VIOLATION, "Attempted to modify dynamic group member attribute");
 							return LDAP_CONSTRAINT_VIOLATION;
 						}
 						if ( m->sml_desc == age->age_def->agd_member_url_ad ) {
-							// XXXX Fixme: add url validity check and flag refresh
-							//age->age_mustrefresh = 1;
-							Debug( LDAP_DEBUG_TRACE, "autogroup_modify_entry attempted to modify group's <%s> memberURL attribute\n", op->o_req_dn.bv_val, 0, 0);
+							LDAPURLDesc		*lud = NULL;
+							int rc;
+
+							for (i=0; !BER_BVISNULL( &m->sml_values[i] ); i++) {
+								Debug( LDAP_DEBUG_TRACE, "==> autogroup_modify_entry modifying group's <%s> member url attribute to <%s>\n", 
+									op->o_req_dn.bv_val, m->sml_values[i].bv_val, 0);
+								rc = autogroup_is_valid_member_url( m->sml_values[i].bv_val );
+								if ( rc != LDAP_URL_SUCCESS ) {
+									overlay_entry_release_ov( op, e, 0, on );
+									ldap_pvt_thread_mutex_unlock( &agi->agi_mutex );
+									Debug( LDAP_DEBUG_TRACE, "autogroup_modify_entry invalid member url <%s>\n", m->sml_values[i].bv_val,0,0);
+									send_ldap_error(op, rs, LDAP_INVALID_SYNTAX, "Invalid autogroup member url");
+									return LDAP_INVALID_SYNTAX;
+								}
+							}
+							ldap_free_urldesc( lud );
 						}
 					}
 					break;
