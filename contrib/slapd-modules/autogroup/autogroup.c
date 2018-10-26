@@ -1642,10 +1642,10 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 							send_ldap_error(op, rs, LDAP_CONSTRAINT_VIOLATION, "Attempted to modify dynamic group member attribute");
 							return LDAP_CONSTRAINT_VIOLATION;
 						}
-						if ( m->sml_desc == age->age_def->agd_member_url_ad ) {
-							LDAPURLDesc		*lud = NULL;
+						/* m->sml_nvalues is NULL when memberURL has been deleted */
+						if (m->sml_desc == age->age_def->agd_member_url_ad && m->sml_nvalues != NULL)
+						{
 							int rc;
-
 							for (i=0; !BER_BVISNULL( &m->sml_values[i] ); i++) {
 								Debug( LDAP_DEBUG_TRACE, "==> autogroup_modify_entry modifying group's <%s> member url attribute to <%s>\n", 
 									op->o_req_dn.bv_val, m->sml_values[i].bv_val, 0);
@@ -1658,7 +1658,6 @@ autogroup_modify_entry( Operation *op, SlapReply *rs)
 									return LDAP_INVALID_SYNTAX;
 								}
 							}
-							ldap_free_urldesc( lud );
 						}
 					}
 					break;
